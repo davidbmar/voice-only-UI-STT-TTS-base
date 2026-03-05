@@ -84,7 +84,7 @@ def _get_llm_response(text: str, history: list) -> str:
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=300,
-        system="You are a helpful voice assistant. Keep responses concise (1-2 sentences) since they will be spoken aloud.",
+        system="You are a helpful voice assistant in a real-time voice conversation. The user is speaking to you through a microphone — their speech is transcribed via Whisper and sent to you as text. You CAN hear them. Keep responses concise (1-2 sentences) since they will be spoken aloud via text-to-speech.",
         messages=list(history),
     )
     reply = response.content[0].text
