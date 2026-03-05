@@ -105,9 +105,89 @@
     width: 24px;
     height: 24px;
   }
+
+  /* Loading overlay */
+  #loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: #0a0a0f;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 32px;
+    transition: opacity 0.5s ease;
+  }
+  #loading-overlay.fade-out {
+    opacity: 0;
+    pointer-events: none;
+  }
+  #loading-overlay h1 {
+    font-size: 24px;
+    font-weight: 600;
+    color: #fff;
+    letter-spacing: -0.5px;
+  }
+  .load-items {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 280px;
+  }
+  .load-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+    color: #888;
+  }
+  .load-item .indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #333;
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .load-item.loading .indicator {
+    background: #facc15;
+    animation: pulse-load 1s infinite;
+  }
+  .load-item.ready .indicator {
+    background: #4ade80;
+    box-shadow: 0 0 8px rgba(74, 222, 128, 0.4);
+  }
+  .load-item.ready { color: #4ade80; }
+  .load-item.loading { color: #facc15; }
+  .load-item .label { flex: 1; }
+  @keyframes pulse-load {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  #loading-hint {
+    font-size: 12px;
+    color: #444;
+    transition: opacity 0.3s;
+  }
 </style>
 </head>
 <body>
+
+<div id="loading-overlay">
+  <h1>Voice Base</h1>
+  <div class="load-items">
+    <div class="load-item" id="load-stt">
+      <span class="indicator"></span>
+      <span class="label">STT Model — waiting</span>
+    </div>
+    <div class="load-item" id="load-tts">
+      <span class="indicator"></span>
+      <span class="label">TTS Voice — waiting</span>
+    </div>
+  </div>
+  <div id="loading-hint">Models load on first launch. This may take a minute.</div>
+</div>
 
 <header>
   <h1>Voice Base</h1>
@@ -358,6 +438,64 @@
       ws.send(JSON.stringify({ type: "hangup" }));
     }
   });
+
+  // ── Loading overlay / preload polling ─────────
+  (function pollPreload() {
+    var overlay = document.getElementById("loading-overlay");
+    var sttEl = document.getElementById("load-stt");
+    var ttsEl = document.getElementById("load-tts");
+    var hint = document.getElementById("loading-hint");
+    var startTime = Date.now();
+    var dismissed = false;
+
+    function updateItem(el, status, modelName) {
+      var label = el.querySelector(".label");
+      if (status === "ready") {
+        el.className = "load-item ready";
+        label.textContent = modelName + " — ready";
+      } else if (status === "loading") {
+        el.className = "load-item loading";
+        label.textContent = modelName + " — loading...";
+      } else {
+        el.className = "load-item";
+        label.textContent = modelName + " — waiting";
+      }
+    }
+
+    function poll() {
+      if (dismissed) return;
+      fetch("/api/config")
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var ms = data.model_status || {};
+
+          var sttName = "STT Model (" + (ms.stt_model || "base") + ")";
+          var ttsName = "TTS Voice (" + (ms.tts_voice || "default") + ")";
+
+          updateItem(sttEl, ms.stt, sttName);
+          updateItem(ttsEl, ms.tts, ttsName);
+
+          if (Date.now() - startTime > 30000) {
+            hint.textContent = "Still loading — large models can take a while on first download.";
+          }
+
+          if (ms.stt === "ready" && ms.tts === "ready") {
+            dismissed = true;
+            setTimeout(function() {
+              overlay.classList.add("fade-out");
+              setTimeout(function() { overlay.remove(); }, 600);
+            }, 400);
+          } else {
+            setTimeout(poll, 500);
+          }
+        })
+        .catch(function() {
+          setTimeout(poll, 1000);
+        });
+    }
+
+    poll();
+  })();
 
   connectSignaling();
 })();

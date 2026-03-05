@@ -30,6 +30,39 @@ def _kill_stale_server(port: int) -> None:
 app = FastAPI(title="Voice Base")
 
 
+@app.on_event("startup")
+async def preload_models():
+    """Preload STT model and default TTS voice in background threads at startup."""
+    import asyncio
+    from config import runtime_settings
+
+    async def _preload():
+        loop = asyncio.get_running_loop()
+
+        # Preload STT
+        try:
+            from engine.stt import _get_model
+            logging.getLogger("server").info("Preloading STT model...")
+            await loop.run_in_executor(None, _get_model)
+        except Exception as e:
+            logging.getLogger("server").error("STT preload failed: %s", e)
+
+        # Preload TTS
+        try:
+            from engine.tts import _get_voice
+            voice = runtime_settings.get("tts_voice", "") or "en_US-lessac-medium"
+            logging.getLogger("server").info("Preloading TTS voice: %s", voice)
+            await loop.run_in_executor(None, _get_voice, voice)
+
+            from config import model_status
+            model_status["tts"] = "ready"
+            model_status["tts_voice"] = voice
+        except Exception as e:
+            logging.getLogger("server").error("TTS preload failed: %s", e)
+
+    asyncio.ensure_future(_preload())
+
+
 @app.get("/")
 async def index():
     return FileResponse("web/index.html")
