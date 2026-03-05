@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice Base</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #0a0a0f;
+    color: #e0e0e0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #1a1a2e;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #fff;
+  }
+  #status {
+    font-size: 13px;
+    color: #666;
+    margin-left: auto;
+  }
+  #status.connected { color: #4ade80; }
+  #status.calling { color: #facc15; }
+  #status.error { color: #f87171; }
+
+  #chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .msg {
+    max-width: 75%;
+    padding: 10px 16px;
+    border-radius: 16px;
+    font-size: 15px;
+    line-height: 1.5;
+    word-wrap: break-word;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: #2563eb;
+    color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: #1e1e2e;
+    color: #e0e0e0;
+    border-bottom-left-radius: 4px;
+  }
+  .msg.status-msg {
+    align-self: center;
+    background: transparent;
+    color: #666;
+    font-size: 13px;
+    padding: 4px;
+  }
+
+  footer {
+    padding: 20px 24px;
+    border-top: 1px solid #1a1a2e;
+    display: flex;
+    justify-content: center;
+  }
+
+  #call-btn {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    border: none;
+    background: #22c55e;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #call-btn:hover { background: #16a34a; transform: scale(1.05); }
+  #call-btn:disabled { background: #333; color: #666; cursor: not-allowed; transform: none; }
+  #call-btn.hangup { background: #ef4444; }
+  #call-btn.hangup:hover { background: #dc2626; }
+
+  /* Phone icon using CSS */
+  .phone-icon {
+    width: 24px;
+    height: 24px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Voice Base</h1>
+  <a href="/admin" style="font-size:13px; color:#7a7a9a; text-decoration:none; transition:color 0.2s;" onmouseover="this.style.color='#e0e0e0'" onmouseout="this.style.color='#7a7a9a'">Admin</a>
+  <span id="status">Connecting...</span>
+</header>
+
+<div id="chat"></div>
+
+<footer>
+  <button id="call-btn" disabled>Call</button>
+</footer>
+
+<script>
+(function() {
+  "use strict";
+
+  const statusEl = document.getElementById("status");
+  const callBtn = document.getElementById("call-btn");
+  const chatEl = document.getElementById("chat");
+
+  let ws = null;
+  let pc = null;
+  let localStream = null;
+  let iceServers = [];
+  let inCall = false;
+
+  function addMessage(text, type) {
+    const div = document.createElement("div");
+    div.className = "msg " + type;
+    div.textContent = text;
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = cls || "";
+  }
+
+  function updateStatusMessage(text) {
+    // Update or create a status message at the bottom of chat
+    let existing = chatEl.querySelector(".msg.status-msg:last-child");
+    if (existing && existing === chatEl.lastElementChild) {
+      existing.textContent = text;
+    } else {
+      addMessage(text, "status-msg");
+    }
+  }
+
+  // ── WebSocket ──────────────────────────────────────
+  function connectSignaling() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = proto + "//" + location.host + "/ws";
+
+    ws = new WebSocket(url);
+
+    ws.onopen = function() {
+      setStatus("Connected", "connected");
+      ws.send(JSON.stringify({ type: "hello" }));
+    };
+
+    ws.onmessage = function(event) {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch(e) { return; }
+
+      switch (msg.type) {
+        case "hello_ack":
+          iceServers = msg.ice_servers || [];
+          callBtn.disabled = false;
+          setStatus("Ready", "connected");
+          break;
+
+        case "webrtc_answer":
+          handleAnswer(msg.sdp);
+          break;
+
+        case "transcript":
+          // Remove status message before adding transcript
+          removeLastStatus();
+          addMessage(msg.text, "user");
+          break;
+
+        case "response":
+          removeLastStatus();
+          addMessage(msg.text, "assistant");
+          break;
+
+        case "status":
+          updateStatusMessage(msg.text);
+          break;
+
+        case "error":
+          setStatus("Error: " + msg.message, "error");
+          if (inCall) cleanupCall();
+          break;
+
+        case "pong":
+          break;
+      }
+    };
+
+    ws.onclose = function() {
+      setStatus("Disconnected");
+      callBtn.disabled = true;
+      ws = null;
+      if (inCall) hangUp();
+      // Reconnect after 3s
+      setTimeout(connectSignaling, 3000);
+    };
+
+    ws.onerror = function() {
+      setStatus("Connection error", "error");
+    };
+  }
+
+  function removeLastStatus() {
+    const last = chatEl.querySelector(".msg.status-msg:last-child");
+    if (last && last === chatEl.lastElementChild) {
+      last.remove();
+    }
+  }
+
+  // ── WebRTC ─────────────────────────────────────────
+  async function startCall() {
+    if (inCall) return;
+
+    setStatus("Requesting mic...", "calling");
+
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000,
+        },
+        video: false,
+      });
+    } catch(err) {
+      setStatus("Mic access denied", "error");
+      return;
+    }
+
+    const rtcConfig = { iceServers: [] };
+    for (const s of iceServers) {
+      const entry = { urls: s.urls || s.url || "" };
+      if (s.username) entry.username = s.username;
+      if (s.credential) entry.credential = s.credential;
+      rtcConfig.iceServers.push(entry);
+    }
+
+    pc = new RTCPeerConnection(rtcConfig);
+
+    for (const track of localStream.getTracks()) {
+      pc.addTrack(track, localStream);
+    }
+
+    pc.ontrack = function(event) {
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
+      audio.playsInline = true;
+      audio.srcObject = event.streams[0] || new MediaStream([event.track]);
+      document.body.appendChild(audio);
+    };
+
+    pc.oniceconnectionstatechange = function() {
+      if (pc.iceConnectionState === "connected") {
+        setStatus("In call", "connected");
+      } else if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
+        setStatus("Call ended", "error");
+        hangUp();
+      }
+    };
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      setStatus("Connecting...", "calling");
+
+      await new Promise(function(resolve) {
+        if (pc.iceGatheringState === "complete") { resolve(); return; }
+        const timer = setTimeout(function() { resolve(); }, 10000);
+        pc.onicegatheringstatechange = function() {
+          if (pc.iceGatheringState === "complete") {
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+      });
+
+      ws.send(JSON.stringify({
+        type: "webrtc_offer",
+        sdp: pc.localDescription.sdp,
+      }));
+
+      inCall = true;
+      callBtn.textContent = "End";
+      callBtn.classList.add("hangup");
+    } catch(err) {
+      setStatus("Call failed", "error");
+      cleanupCall();
+    }
+  }
+
+  async function handleAnswer(sdp) {
+    if (!pc) return;
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: sdp }));
+    } catch(err) {
+      console.error("Failed to set answer:", err);
+    }
+  }
+
+  function hangUp() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "hangup" }));
+    }
+    cleanupCall();
+    setStatus("Ready", "connected");
+  }
+
+  function cleanupCall() {
+    inCall = false;
+    callBtn.textContent = "Call";
+    callBtn.classList.remove("hangup");
+
+    if (pc) { pc.close(); pc = null; }
+    if (localStream) {
+      for (const t of localStream.getTracks()) t.stop();
+      localStream = null;
+    }
+  }
+
+  callBtn.addEventListener("click", function() {
+    if (inCall) hangUp(); else startCall();
+  });
+
+  setInterval(function() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "ping" }));
+    }
+  }, 30000);
+
+  window.addEventListener("beforeunload", function() {
+    if (inCall && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "hangup" }));
+    }
+  });
+
+  connectSignaling();
+})();
+</script>
+</body>
+</html>
